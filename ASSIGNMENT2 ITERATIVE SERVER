@@ -1,0 +1,180 @@
+//Mahdi Amin, Yazeed Ashraf
+//135032,140982
+#include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+
+#define MAX_RESPONSE_SIZE 4096
+
+bool isUpperCase(char c) {
+    return c >= 'A' && c <= 'Z';
+}
+
+bool isLowerCase(char c) {
+    return c >= 'a' && c <= 'z';
+}
+
+bool isDigit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+bool isSpecialChar(char c) {
+    return c == '!' || c == '@' || c == '#';
+}
+
+bool isPasswordValid(const char* password, char* errorMessages) {
+    int length = strlen(password);
+    bool hasUpperCase = false;
+    bool hasLowerCase = false;
+    bool hasDigit = false;
+    bool hasSpecialChar = false;
+
+    if (strcmp(password, "done") == 0) {
+        strcpy(errorMessages, "Termination requested by the client.\n");
+        return false;
+    }
+
+    strcpy(errorMessages, "Your password ");
+    strcat(errorMessages, password);
+    strcat(errorMessages, " is not acceptable. Please include:\n");
+
+    for (int i = 0; i < length; i++) {
+        char c = password[i];
+        if (isUpperCase(c)) {
+            hasUpperCase = true;
+        } else if (isLowerCase(c)) {
+            hasLowerCase = true;
+        } else if (isDigit(c)) {
+            hasDigit = true;
+        } else if (isSpecialChar(c)) {
+            hasSpecialChar = true;
+        }
+    }
+
+    if (length < 8 || length > 16) {
+        strcat(errorMessages, "Violation (*) Password must be 8-16 characters in length.\n");
+    }
+    if (!hasUpperCase) {
+        strcat(errorMessages, "Violation (*) Must contain at least one uppercase alphabet character (A-Z).\n");
+    }
+    if (!hasLowerCase) {
+        strcat(errorMessages, "Violation (*) Must contain at least one lowercase alphabet character (a-z).\n");
+    }
+    if (!hasDigit) {
+        strcat(errorMessages, "Violation (*) Must contain at least one numeric character (0-9).\n");
+    }
+    if (!hasSpecialChar) {
+        strcat(errorMessages, "Violation (*) Must contain at least one special character (!@#).\n");
+    }
+
+    return (length >= 8 && length <= 16 && hasUpperCase && hasLowerCase && hasDigit && hasSpecialChar);
+}
+
+int main(int argc, char* argv[]) {
+    // Check for correct command-line arguments
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <Port>\n \n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int listenfd, connfd;
+    struct sockaddr_in servaddr, cliaddr;
+
+    // Create a socket
+    if ((listenfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("socket error");
+        exit(EXIT_FAILURE);
+    }
+
+    // Initialize server address structure
+    bzero(&servaddr, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(atoi(argv[1])); // Port from command line argument
+
+    // Bind the socket
+    if (bind(listenfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) == -1) {
+        perror("bind error");
+        close(listenfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Listen for incoming connections
+    if (listen(listenfd, 10) == -1) {
+        perror("listen error");
+        close(listenfd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Server listening on port %d\n", atoi(argv[1]));
+
+    char password[100];
+    char errorMessages[2048];
+
+    while (1) {
+        socklen_t len = sizeof(cliaddr);
+
+        // Accept incoming client connection
+        if ((connfd = accept(listenfd, (struct sockaddr*)&cliaddr, &len)) == -1) {
+            perror("accept error");
+            close(listenfd);
+            exit(EXIT_FAILURE);
+        }
+
+        while (1) {
+            int bytesRead = read(connfd, password, sizeof(password));
+
+            if (bytesRead <= 0) {
+                printf("Client connection closed.\n");
+                close(connfd);
+                break;
+            }
+
+            password[bytesRead] = '\0';
+
+            // Check for client termination request
+            if (strcmp(password, "done") == 0) {
+                printf("Client requested termination.\n");
+                close(connfd);
+                break;
+            }
+
+            // Validate the password and send appropriate response
+            if (isPasswordValid(password, errorMessages)) {
+                char clientIP[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(cliaddr.sin_addr), clientIP, INET_ADDRSTRLEN);
+
+                printf("Client IP: %s, Port: %d, Password: %s\n", clientIP, ntohs(cliaddr.sin_port), password);
+
+                // Send acceptance message
+                char response[512];
+                sprintf(response, "Your password: %s is acceptable.\n", password);
+
+                if (write(connfd, response, strlen(response)) == -1) {
+                    perror("write error");
+                    close(connfd);
+                    break;
+                }
+            } else {
+                char clientIP[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(cliaddr.sin_addr), clientIP, INET_ADDRSTRLEN);
+
+                printf("Client IP: %s, Port: %d, Password: %s\n", clientIP, ntohs(cliaddr.sin_port), password);
+
+                // Send error messages
+                if (write(connfd, errorMessages, strlen(errorMessages)) == -1) {
+                    perror("write error");
+                    close(connfd);
+                    break;
+                }
+            }
+        }
+    }
+
+    close(listenfd);
+    return 0;
+}
