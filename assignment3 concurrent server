@@ -1,0 +1,233 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
+
+#define MAX_RESPONSE_SIZE 4096
+
+volatile sig_atomic_t termination_requested = 0;
+
+// Signal handler for SIGQUIT
+void sigquit_handler(int signo) {
+    if (signo == SIGQUIT) {
+        termination_requested = 1;
+    }
+}
+
+// Function to check if a character belongs to a specific type
+bool isCharOfType(char c, int type) {
+    switch (type) {
+        case 1: // Uppercase
+            return c >= 'A' && c <= 'Z';
+        case 2: // Lowercase
+            return c >= 'a' && c <= 'z';
+        case 3: // Digit
+            return c >= '0' && c <= '9';
+        case 4: // Special character
+            return c == '!' || c == '@' || c == '#' || c == '$' || c == '^' || c == '&' || c == '*' || c == '+'|| c == '=';
+        default:
+            return false;
+    }
+}
+
+// Function to validate if a password is acceptable
+bool isPasswordValid(const char* password, char* errorMessages) {
+    int length = strlen(password);
+    int categoryCount = 0; // To track the number of fulfilled categories
+
+    // Check for termination request
+    if (termination_requested) {
+        strcpy(errorMessages, "Termination requested by the client.\n");
+        return false;
+    }
+
+    // Initialize error message
+    strcpy(errorMessages, "Your password ");
+    strcat(errorMessages, password);
+    strcat(errorMessages, " is not acceptable. Please include:\n");
+
+    // Check for password length
+    if (length < 8 || length > 16) {
+        strcat(errorMessages, "Violation (*) Password must be 8-16 characters in length.\n");
+    }
+
+    // Check for character categories
+    for (int type = 1; type <= 4; type++) {
+        for (int i = 0; i < length; i++) {
+            char c = password[i];
+            if (isCharOfType(c, type)) {
+                categoryCount++;
+                break; // Move to the next category
+            }
+        }
+    }
+
+    // Check if at least three categories are fulfilled
+    if (categoryCount < 3) {
+        strcat(errorMessages, "Violation (*) Must include characters from at least three of the following four categories:\n");
+        strcat(errorMessages, "a. Uppercase alphabet characters (A-Z)\n");
+        strcat(errorMessages, "b. Lowercase alphabet characters (a-z)\n");
+        strcat(errorMessages, "c. Numeric characters (0-9)\n");
+        strcat(errorMessages, "d. Any of the following special characters (!@#$^&*+=)\n");
+    }
+
+    // Check if the password meets the criteria
+    if (length < 8 || length > 16 || categoryCount < 3) {
+        return false;
+    }
+
+    return true;
+}
+
+// Function to handle the client connection
+void handleClient(int connfd, struct sockaddr_in cliaddr) {
+    char password[100];
+    char errorMessages[2048];
+
+    while (1) {
+        int bytesRead = read(connfd, password, sizeof(password));
+
+        if (bytesRead <= 0) {
+            printf("Client connection closed.\n");
+            close(connfd);
+            break;
+        }
+
+        password[bytesRead] = '\0';
+
+        // Check for client termination request
+        if (termination_requested) {
+            printf("Child process sending termination signal to the parent.\n");
+            kill(getppid(), SIGQUIT); // Send SIGQUIT to the parent
+            close(connfd);
+            printf("Goodbye from the child process.\n");
+            exit(EXIT_SUCCESS);
+        }
+
+        // Validate the password and send appropriate response
+        if (isPasswordValid(password, errorMessages)) {
+            char clientIP[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(cliaddr.sin_addr), clientIP, INET_ADDRSTRLEN);
+
+            printf("Client IP: %s, Port: %d, Password: %s\n", clientIP, ntohs(cliaddr.sin_port), password);
+
+            // Send acceptance message
+            char response[512];
+            sprintf(response, "Your password: %s is acceptable.\n", password);
+
+            if (write(connfd, response, strlen(response)) == -1) {
+                perror("write error");
+                close(connfd);
+                break;
+            }
+        } else {
+            char clientIP[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(cliaddr.sin_addr), clientIP, INET_ADDRSTRLEN);
+
+            printf("Client IP: %s, Port: %d, Password: %s\n", clientIP, ntohs(cliaddr.sin_port), password);
+
+            // Send error messages
+            if (write(connfd, errorMessages, strlen(errorMessages)) == -1) {
+                perror("write error");
+                close(connfd);
+                break;
+            }
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    // Check for correct command-line arguments
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <Port>\n \n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int listenfd, connfd;
+    struct sockaddr_in servaddr, cliaddr;
+
+    // Create a socket
+    if ((listenfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+        perror("socket error");
+        exit(EXIT_FAILURE);
+    }
+
+    // Initialize server address structure
+    bzero(&servaddr, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    // Check if the specified port is allowed
+    int port = atoi(argv[1]);
+    if (port != 44982 && port != 44032) {
+        fprintf(stderr, "Invalid port. Please use either 44982 or 44032.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    servaddr.sin_port = htons(port); // Port from command line argument
+
+    // Bind the socket
+    if (bind(listenfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) == -1) {
+        perror("bind error");
+        close(listenfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Listen for incoming connections
+    if (listen(listenfd, 10) == -1) {
+        perror("listen error");
+        close(listenfd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Server listening on port %d\n", atoi(argv[1]));
+
+    // Register the SIGQUIT handler
+    signal(SIGQUIT, sigquit_handler);
+
+    while (1) {
+        socklen_t len = sizeof(cliaddr);
+
+        // Accept incoming client connection
+        if ((connfd = accept(listenfd, (struct sockaddr*)&cliaddr, &len)) == -1) {
+            perror("accept error");
+            close(listenfd);
+            exit(EXIT_FAILURE);
+        }
+
+        pid_t pid = fork();
+
+        if (pid == -1) {
+            perror("fork error");
+            close(connfd);
+            close(listenfd);
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) {  // Child process
+            close(listenfd);  // Child does not need the listener
+            handleClient(connfd, cliaddr);
+            close(connfd);  // Close the connection in the child process
+            printf("Goodbye from the child process.\n");
+            exit(EXIT_SUCCESS);
+        } else {  // Parent process
+            close(connfd);  // Parent does not need the connection socket
+            int status;
+            while (waitpid(-1, &status, WNOHANG) > 0);
+            if (termination_requested) {
+                printf("Server is terminating.\n");
+                close(listenfd);
+                exit(EXIT_SUCCESS);
+            }
+        }
+    }
+
+    // Close the listener socket
+    close(listenfd);
+
+    return 0;
+}
